@@ -2391,7 +2391,9 @@ class WebhookController extends Controller
         try {
             $botToken = $this->settings->get('telegram_bot_token');
             // ✅ اصلاح: حذف space بین bot و token
+
             $apiUrl = "https://api.telegram.org/bot{$botToken}/getChatMember";
+
 
             $response = Http::timeout(10)->get($apiUrl, [
                 'chat_id' => $channelId,
@@ -2432,7 +2434,9 @@ class WebhookController extends Controller
         if (str_starts_with($channelId, '@')) {
             $username = ltrim($channelId, '@');
             // ✅ اصلاح: حذف space بعد از t.me/
+
             $channelLink = "https://t.me/{$username}";
+
             $channelDisplayName = "@" . $username;
         } elseif (preg_match('/^-100\d+$/', $channelId)) {
             $channelDisplayName = "کانال خصوصی";
@@ -2711,7 +2715,11 @@ class WebhookController extends Controller
                                 $params['host'] = $streamSettings['wsSettings']['headers']['Host'] ?? $tunnelAddress;
                             }
 
-                            $remarkText = "🇺🇸-" . $uniqueUsername;
+                            $flag = $targetServer->location->flag ?? '🏳️';
+
+                            $remarkText = $flag . "-" . $uniqueUsername;
+
+
                             $qs = http_build_query($params);
 //
                             $configLink = "vless://{$uuid}@{$tunnelAddress}:{$tunnelPort}?{$qs}#" . rawurlencode($remarkText);
