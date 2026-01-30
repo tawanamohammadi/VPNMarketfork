@@ -1747,8 +1747,10 @@ class WebhookController extends Controller
                                 $params['host'] = $streamSettings['wsSettings']['headers']['Host'] ?? $tunnelAddress;
                             }
 
-                            // ✅ اصلاح نام: استفاده مستقیم از ایموجی
-                            $remarkText = "🇺🇸-" . $uniqueUsername;
+
+
+                            $locFlag = $targetServer->location->flag ?? '🏳️';
+                            $remarkText = $locFlag . "-" . $uniqueUsername;
 
                             $queryString = http_build_query($params);
                             // ساخت لینک نهایی
@@ -2718,6 +2720,8 @@ class WebhookController extends Controller
                             $flag = $targetServer->location->flag ?? '🏳️';
 
                             $remarkText = $flag . "-" . $uniqueUsername;
+
+
 
 
                             $qs = http_build_query($params);
