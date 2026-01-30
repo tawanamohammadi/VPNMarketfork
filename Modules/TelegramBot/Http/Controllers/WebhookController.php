@@ -336,6 +336,112 @@ class WebhookController extends Controller
         $this->sendOrEditMessage($user->telegram_chat_id, $message, $keyboard, $messageId);
     }
 
+    /**
+     * ارسال مجدد لینک اکانت تست (برای کپی آسان)
+     */
+    protected function handleTrialCopyLink($user, $messageId = null)
+    {
+        try {
+            $link = \Illuminate\Support\Facades\Cache::get("trial_link_{$user->id}");
+
+            if (!$link) {
+                Telegram::sendMessage([
+                    'chat_id' => $user->telegram_chat_id,
+                    'text' => $this->escape("❌ لینک اکانت تست منقضی شده یا یافت نشد.\nلطفاً اکانت تست جدیدی دریافت کنید."),
+                    'parse_mode' => 'MarkdownV2',
+                    'reply_markup' => Keyboard::make()->inline()->row([
+                        Keyboard::inlineButton(['text' => '🧪 دریافت اکانت تست', 'callback_data' => 'trial_request'])
+                    ])
+                ]);
+                return;
+            }
+
+            Telegram::sendMessage([
+                'chat_id' => $user->telegram_chat_id,
+                'text' => "📋 *لینک اکانت تست شما:*\n\n`{$link}`\n\n" . $this->escape("روی لینک بالا کلیک کنید تا کپی شود."),
+                'parse_mode' => 'MarkdownV2',
+                'reply_markup' => Keyboard::make()->inline()->row([
+                    Keyboard::inlineButton(['text' => '⬅️ بازگشت به منو', 'callback_data' => '/start'])
+                ])
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Trial copy link error: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * ارسال QR Code برای اکانت تست
+     */
+    protected function sendTrialQRCode($user, $messageId = null)
+    {
+        try {
+            $link = \Illuminate\Support\Facades\Cache::get("trial_link_{$user->id}");
+
+            if (!$link) {
+                Telegram::sendMessage([
+                    'chat_id' => $user->telegram_chat_id,
+                    'text' => $this->escape("❌ لینک اکانت تست منقضی شده."),
+                    'parse_mode' => 'MarkdownV2'
+                ]);
+                return;
+            }
+
+            $tempFile = null;
+            try {
+                $qrParams = [
+                    'size' => '400x400',
+                    'data' => $link,
+                    'ecc' => 'M',
+                    'margin' => 10,
+                    'format' => 'png'
+                ];
+
+                $qrUrl = "https://api.qrserver.com/v1/create-qr-code/?" . http_build_query($qrParams);
+
+                $ch = curl_init();
+                curl_setopt_array($ch, [
+                    CURLOPT_URL => $qrUrl,
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_TIMEOUT => 30
+                ]);
+
+                $qrData = curl_exec($ch);
+                curl_close($ch);
+
+                if (!$qrData) throw new \Exception("QR generation failed");
+
+                $tempDir = storage_path('app/temp');
+                if (!is_dir($tempDir)) mkdir($tempDir, 0755, true);
+
+                $tempFile = $tempDir . '/qr_trial_' . $user->id . '_' . time() . '.png';
+                file_put_contents($tempFile, $qrData);
+
+                Telegram::sendPhoto([
+                    'chat_id' => $user->telegram_chat_id,
+                    'photo' => InputFile::create($tempFile),
+                    'caption' => $this->escape("📱 QR Code اکانت تست\n\nلینک:\n`{$link}`"),
+                    'parse_mode' => 'MarkdownV2'
+                ]);
+
+            } finally {
+                if ($tempFile && file_exists($tempFile)) {
+                    @unlink($tempFile);
+                }
+            }
+
+        } catch (\Exception $e) {
+            Log::error('Trial QR error: ' . $e->getMessage());
+            Telegram::sendMessage([
+                'chat_id' => $user->telegram_chat_id,
+                'text' => $this->escape("❌ خطا در ساخت QR Code"),
+                'parse_mode' => 'MarkdownV2'
+            ]);
+        }
+    }
+
     protected function handleCallbackQuery($update)
     {
         $callbackQuery = $update->getCallbackQuery();
@@ -432,10 +538,26 @@ class WebhookController extends Controller
         } elseif (Str::startsWith($data, 'pay_card_')) {
             $orderId = Str::after($data, 'pay_card_');
             $this->sendCardPaymentInfo($chatId, $orderId, $messageId);
-        } elseif (Str::startsWith($data, 'enter_discount_')) {
+        }
+
+        elseif (Str::startsWith($data, 'copy_trial_link_')) {
+            $userId = Str::after($data, 'copy_trial_link_');
+            $this->handleTrialCopyLink($user, $messageId);
+        }
+        elseif (Str::startsWith($data, 'qr_trial_')) {
+            $this->sendTrialQRCode($user, $messageId);
+        }
+
+        elseif (Str::startsWith($data, 'enter_discount_')) {
             $orderId = Str::after($data, 'enter_discount_');
             $this->promptForDiscount($user, $orderId, $messageId);
-        } elseif (Str::startsWith($data, 'remove_discount_')) {
+        }
+        elseif (Str::startsWith($data, 'copy_link_')) {
+            $orderId = Str::after($data, 'copy_link_');
+            $this->handleCopyLinkRequest($user, $orderId);
+        }
+
+        elseif (Str::startsWith($data, 'remove_discount_')) {
             $orderId = Str::after($data, 'remove_discount_');
             $this->removeDiscount($user, $orderId, $messageId);
         } elseif (Str::startsWith($data, 'qrcode_order_')) {
@@ -923,14 +1045,50 @@ class WebhookController extends Controller
             // ارسال پیام موفقیت (خارج از تراکنش)
             // ✅ اصلاح: حالا $order و $plan در دسترس هستند چون با & پاس شده‌اند
             $link = $order->config_details;
-            $keyboard = Keyboard::make()->inline()->row([
-                Keyboard::inlineButton(['text' => '🛠 سرویس‌های من', 'callback_data' => '/my_services']),
-                Keyboard::inlineButton(['text' => '🏠 منوی اصلی', 'callback_data' => '/start'])
-            ]);
+
+            // بارگذاری اطلاعات کامل سفارش
+            $order->load(['server.location', 'plan']);
+
+            // آماده‌سازی اطلاعات سرور و کشور
+            $serverName = 'سرور اصلی';
+            $locationFlag = '🏳️';
+            $locationName = 'نامشخص';
+
+            if ($order->server) {
+                $serverName = $order->server->name;
+                if ($order->server->location) {
+                    $locationFlag = $order->server->location->flag ?? '🏳️';
+                    $locationName = $order->server->location->name;
+                }
+            }
+
+            // ساخت پیام کامل
+            $message = "✅ *خرید موفق!*\n\n";
+            $message .= "📦 *پلن:* `{$this->escape($order->plan->name)}`\n";
+            $message .= "🌍 *موقعیت:* {$locationFlag} {$this->escape($locationName)}\n";
+            $message .= "🖥 *سرور:* {$this->escape($serverName)}\n";
+            $message .= "💾 *حجم:* {$order->plan->volume_gb} گیگابایت\n";
+            $message .= "📅 *مدت:* {$order->plan->duration_days} روز\n";
+            $message .= "⏳ *انقضا:* `{$order->expires_at->format('Y/m/d H:i')}`\n";
+            $message .= "👤 *یوزرنیم:* `{$order->panel_username}`\n\n";
+            $message .= "🔗 *لینک کانفیگ شما:*\n";
+            $message .= "`{$link}`\n\n";
+            $message .= "⚠️ روی لینک بالا کلیک کنید تا کپی شود";
+
+            // کیبورد با دکمه کپی لینک
+            $keyboard = Keyboard::make()->inline()
+                ->row([
+                    Keyboard::inlineButton(['text' => '📋 کپی لینک کانفیگ', 'callback_data' => "copy_link_{$order->id}"]),
+                    Keyboard::inlineButton(['text' => '📱 QR Code', 'callback_data' => "qrcode_order_{$order->id}"])
+                ])
+                ->row([
+                    Keyboard::inlineButton(['text' => '🛠 سرویس‌های من', 'callback_data' => '/my_services']),
+                    Keyboard::inlineButton(['text' => '🏠 منوی اصلی', 'callback_data' => '/start'])
+                ]);
 
             $this->sendOrEditMessage(
                 $user->telegram_chat_id,
-                "✅ خرید موفق!\n\nلینک کانفیگ شما:\n{$link}\n\n⚠️ این لینک را کپی کرده و در برنامه V2Ray خود وارد کنید.",
+                $message,
                 $keyboard,
                 $messageId
             );
@@ -1684,6 +1842,7 @@ class WebhookController extends Controller
                 // ساخت کاربر
                 $response = $xui->addClient($inboundId, $clientData);
 
+
                 if ($response && isset($response['success']) && $response['success']) {
                     // استخراج اطلاعات
                     $uuid = $response['generated_uuid'] ?? null;
@@ -2041,6 +2200,52 @@ class WebhookController extends Controller
             $this->sendOrEditMessage($user->telegram_chat_id, $errorMessage, $errorKeyboard, $messageId);
         }
     }
+
+    /**
+     * ارسال لینک خام (بدون فرمت) برای کپی آسان
+     */
+    protected function handleCopyLinkRequest($user, $orderId, $messageId = null)
+    {
+        try {
+            $order = $user->orders()->with('plan')->find($orderId);
+
+            if (!$order || $order->status !== 'paid') {
+                Telegram::sendMessage([
+                    'chat_id' => $user->telegram_chat_id,
+                    'text' => $this->escape("❌ سفارش یافت نشد یا معتبر نیست."),
+                    'parse_mode' => 'MarkdownV2'
+                ]);
+                return;
+            }
+
+            if (empty($order->config_details)) {
+                Telegram::sendMessage([
+                    'chat_id' => $user->telegram_chat_id,
+                    'text' => $this->escape("❌ لینک کانفیگ هنوز آماده نیست."),
+                    'parse_mode' => 'MarkdownV2'
+                ]);
+                return;
+            }
+
+            // ارسال لینک خالی (بدون markdown) که کاربر بتواند کپی کند
+            Telegram::sendMessage([
+                'chat_id' => $user->telegram_chat_id,
+                'text' => $order->config_details, // فقط لینک خالی بدون هیچ فرمتی
+                'reply_markup' => Keyboard::make()->inline()->row([
+                    Keyboard::inlineButton(['text' => '⬅️ بازگشت به جزئیات سرویس', 'callback_data' => "show_service_{$orderId}"])
+                ])
+            ]);
+
+        } catch (\Exception $e) {
+            Log::error('Copy link error: ' . $e->getMessage());
+            Telegram::sendMessage([
+                'chat_id' => $user->telegram_chat_id,
+                'text' => $this->escape("❌ خطا در ارسال لینک."),
+                'parse_mode' => 'MarkdownV2'
+            ]);
+        }
+    }
+
 
     protected function handleRenewCardPayment($user, $originalOrderId, $messageId)
     {
@@ -2750,24 +2955,49 @@ class WebhookController extends Controller
             }
 
             if ($configLink) {
-                $user->increment('trial_accounts_taken');
+                if ($configLink) {
+                    $user->increment('trial_accounts_taken');
 
-                // ساخت پیام با escape کردن صحیح متن‌ها (به جز لینک که داخل backtick است)
-                $message = $this->escape("✅ اکانت تست شما با موفقیت ساخته شد!") . "\n\n";
-                $message .= $this->escape("📦 حجم: ") . "*" . $volumeMB . "*" . $this->escape(" مگابایت") . "\n";
-                $message .= $this->escape("⏳ اعتبار: ") . "*" . $durationHours . "*" . $this->escape(" ساعت") . "\n\n";
-                $message .= $this->escape("🔗 لینک اتصال:") . "\n";
-                $message .= "`" . $configLink . "`\n\n"; // لینک داخل backtick - نیازی به escape نیست
-                $message .= $this->escape("⚠️ برای کپی روی لینک بالا کلیک کنید.");
+                    // ذخیره لینک توی cache برای ۱۰ دقیقه (برای دکمه کپی)
+                    \Illuminate\Support\Facades\Cache::put("trial_link_{$user->id}", $configLink, now()->addMinutes(10));
 
-                Telegram::sendMessage([
-                    'chat_id' => $chatId,
-                    'text' => $message,
-                    'parse_mode' => 'MarkdownV2'
-                ]);
+                    // بارگذاری اطلاعات سرور برای نمایش کشور
+                    $locationFlag = '🏳️';
+                    $locationName = 'نامشخص';
+                    if ($targetServer && $targetServer->location) {
+                        $locationFlag = $targetServer->location->flag ?? '🏳️';
+                        $locationName = $targetServer->location->name;
+                    }
 
-                Log::info('Trial account created successfully', ['user_id' => $user->id, 'username' => $uniqueUsername]);
-            }
+                    // ساخت پیام کامل
+                    $message = $this->escape("✅ اکانت تست شما با موفقیت ساخته شد!") . "\n\n";
+                    $message .= "🌍 *موقعیت:* {$locationFlag} " . $this->escape($locationName) . "\n";
+                    $message .= "📦 *حجم:* `{$volumeMB}` " . $this->escape("مگابایت") . "\n";
+                    $message .= "⏳ *اعتبار:* `{$durationHours}` " . $this->escape("ساعت") . "\n\n";
+                    $message .= "🔗 *لینک کانفیگ:*\n";
+                    $message .= "`{$configLink}`\n\n";
+                    $message .= $this->escape("⚠️ روی لینک بالا کلیک کنید یا دکمه زیر را بزنید.");
+
+                    // کیبورد با دکمه کپی و QR
+                    $keyboard = Keyboard::make()->inline()
+                        ->row([
+                            Keyboard::inlineButton(['text' => '📋 کپی لینک', 'callback_data' => "copy_trial_link_{$user->id}"]),
+                            Keyboard::inlineButton(['text' => '📱 QR Code', 'callback_data' => "qr_trial_{$user->id}"])
+                        ])
+                        ->row([
+                            Keyboard::inlineButton(['text' => '🛒 خرید سرویس', 'callback_data' => '/plans']),
+                            Keyboard::inlineButton(['text' => '🏠 منوی اصلی', 'callback_data' => '/start'])
+                        ]);
+
+                    Telegram::sendMessage([
+                        'chat_id' => $chatId,
+                        'text' => $message,
+                        'parse_mode' => 'MarkdownV2',
+                        'reply_markup' => $keyboard
+                    ]);
+
+                    Log::info('Trial account created successfully', ['user_id' => $user->id, 'username' => $uniqueUsername]);
+                    }}
         } catch (\Exception $e) {
             Log::error('Trial Account Creation Failed', [
                 'user_id' => $user->id,
